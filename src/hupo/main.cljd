@@ -1,7 +1,6 @@
 (ns hupo.main
   (:require ["package:flutter/material.dart" :as m]
             ["package:flutter/widgets.dart" :as w]
-            ["package:flutter/scheduler.dart" :as sch]
             [cljd.flutter :as f]))
 
 (def state
@@ -21,10 +20,6 @@
 (defn get-pawn-position [pawns selected-pawn]
   (let [[color id] selected-pawn]
     (get-in pawns [color id])))
-
-(defn valid-tile-type? [x y]
-  (and (>= x 0) (< x board-size-x)
-       (>= y 0) (< y board-size-y)))
 
 (defn increase-turn-no [state]
   (if (and (-> state :finished :white)
@@ -67,6 +62,16 @@
             state
             current-pawns)))
 
+(defn valid-tile? [pawns x y]
+  (and (>= x 0) (< x board-size-x)
+       (>= y 0) (< y board-size-y)
+       (not (= [1 2] [x y]))
+       (not (some (fn [[_ positions]]
+                    (some (fn [[_ [px py]]]
+                            (and (= px x) (= py y)))
+                          positions))
+                  pawns))))
+
 (defn get-valid-tile [x y selected-pawn pawns]
   (let [[sx sy] (get-pawn-position pawns selected-pawn)
         nx (int (/ x cell-size))
@@ -75,34 +80,21 @@
                         (<= (abs (- ny sy)) 0.5))
                    (and (<= (abs (- nx sx)) 0.5)
                         (<= (abs (- ny sy)) 1)))
-               (not (= [nx ny] [1 2])) ;;abyss
-               (valid-tile-type? nx ny)
-               (not (some (fn [[_ positions]]
-                            (some (fn [[_ [px py]]]
-                                    (and (= px nx) (= py ny)))
-                                  positions))
-                          pawns)))
+               (valid-tile? pawns nx ny))
       [nx ny])))
 
-(defn get-valid-moves [x y]
-  (let [possible-moves [[0 1] [0 -1] [1 0] [-1 0]]
-        valid-move? (fn [[dx dy]]
-                      (and (>= dx 0)
-                           (< dx 3)
-                           (>= dy 0)
-                           (< dy 5)
-                           (not (and (= dx 1) (= dy 2)))))]
-    (filter valid-move? (map (fn [[dx dy]] [(+ x dx) (+ y dy)]) possible-moves))))
+(defn get-valid-moves [pawns x y]
+  (let [possible-moves [[0 1] [0 -1] [1 0] [-1 0]]]
+    (->> possible-moves
+         (map (fn [[dx dy]] [(+ x dx) (+ y dy)]))
+         (filter (fn [pm] (apply #(valid-tile? pawns %1 %2) pm))))))
 
 (defn remove-blocked-pawn [{:keys [selected-pawn pawns] :as state}]
   (when (vector? selected-pawn)
     (let [[sx sy] (get-in pawns selected-pawn)
-          valid-moves (get-valid-moves sx sy)
-          white-pawns (:white pawns)
-          black-pawns (:black pawns)
-          pawn-positions (set (concat (vals white-pawns) (vals black-pawns)))
-          [color id] selected-pawn]
-      (if (every? (fn [pos] (pawn-positions pos)) valid-moves)
+          [color id] selected-pawn
+          valid-moves (get-valid-moves pawns sx sy)]
+      (if (empty? valid-moves)
         (-> state
             (update-in [:pawns color] dissoc id)
             (assoc :selected-pawn nil)
@@ -153,7 +145,10 @@
                    "\nPositions B:" (:black pawns)
                    "\nFinished: " finished
                    "\nTurn Number:" turn-no
-                   "\nWinner Pawn: " winner-pawn)
+                   "\nWinner Pawn: " winner-pawn
+                   "\nValid Moves: " (when selected-pawn
+                                       (apply #(get-valid-moves pawns %1 %2)
+                                              (get-in pawns selected-pawn))))
               .style (w/TextStyle
                       .fontSize 18
                       .fontWeight w/FontWeight.bold))))))
@@ -225,14 +220,15 @@
                         [id [x y]] positions]
                     (let [selected? (and (= selected-color color)
                                          (= selected-id id))]
-
-                      (w/AnimatedPositioned
-                       .left (* x cell-size)
-                       .top (* y cell-size)
-                       .duration (m/Duration. .seconds 1)
-                       .child (w/GestureDetector
-                               .onTap #(swap! state select-pawn color id)
-                               .child (pawn-widget color selected?)))))))
+                      (f/widget
+                       :key (str color "-" id)
+                       (w/AnimatedPositioned
+                        .left (* x cell-size)
+                        .top (* y cell-size)
+                        .duration (m/Duration. .seconds 1)
+                        .child (w/GestureDetector
+                                .onTap #(swap! state select-pawn color id)
+                                .child (pawn-widget color selected?))))))))
           (message-box)])
         (if (first-turn-rule-black? turn-no turn-phase)
           (skip-turn-button state)
