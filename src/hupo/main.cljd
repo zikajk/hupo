@@ -1,7 +1,29 @@
-(ns hupo.main
-  (:require ["package:flutter/material.dart" :as m]
-            ["package:flutter/widgets.dart" :as w]
-            [cljd.flutter :as f]))
+ (ns hupo.main
+   (:require ["package:flutter/material.dart" :as m]
+             ["package:flutter/widgets.dart" :as w]
+             ["dart:async" :as async]
+             ["dart:io" :as io]
+             ["package:flutter/scheduler.dart" :as sched]
+             [cljd.flutter :as f]))
+
+(def initial-state
+  {:pawns           {:white {:a [0 0]
+                             :b [1 0]
+                             :c [2 0]}
+                     :black {:a [0 4]
+                             :b [1 4]
+                             :c [2 4]}}
+   :selected-pawn   nil
+   :last-moved-pawn nil
+   :fixed-pawn      nil
+   :ai-player       :black
+   :ai-enabled      true #_false
+   :current-player  :white
+   :turn-phase      :designated-move
+   :winner-pawn     nil
+   :turn-finished        {:white false
+                          :black false}
+   :turn-no         1})
 
 (def state
   (atom {}))
@@ -10,44 +32,48 @@
 (def board-size-y 5)
 (def cell-size 80)
 
-(defn cell-widget [x y]
-  (w/Container
-   .width  cell-size
-   .height cell-size
-   .decoration (w/BoxDecoration
-                .color (if (even? (+ x y)) m/Colors.white m/Colors.grey))))
+(defn cell-widget [pos]
+  (let [abyss [1 2]
+        black-target [1 1]
+        white-target [1 3]
+        border-width 1.0
+        border-color m/Colors.black]
+    (w/Container
+     .width  cell-size
+     .height cell-size
+     .decoration (w/BoxDecoration
+                  .color (condp = pos
+                           abyss m/Colors.grey.shade400
+                           black-target m/Colors.grey
+                           white-target m/Colors.grey
+                           m/Colors.grey)
+                  .border (w/Border
+                           .top (w/BorderSide .width border-width .color border-color)
+                           .bottom (w/BorderSide .width border-width .color border-color)
+                           .left (w/BorderSide .width border-width .color border-color)
+                           .right (w/BorderSide .width border-width .color border-color)))
+     .child (if (#{black-target white-target} pos)
+              (w/Center .child (m/Text
+                                "λ"
+                                .style (m/TextStyle
+                                        .fontWeight m/FontWeight.bold
+                                        .color (if (= black-target pos)
+                                                 m/Colors.black
+                                                 m/Colors.green.shade600)
+                                        .fontSize 25)))
+              (w/Container)))))
 
 (defn get-pawn-position [pawns selected-pawn]
   (let [[color id] selected-pawn]
     (get-in pawns [color id])))
 
 (defn increase-turn-no [state]
-  (if (and (-> state :finished :white)
-           (-> state :finished :black))
+  (if (and (-> state :turn-finished :white)
+           (-> state :turn-finished :black))
     (-> state
         (update :turn-no inc)
-        (assoc :finished {:white false :black false}))
+        (assoc :turn-finished {:white false :black false}))
     state))
-
-(defn change-turn [state]
-  (let [color (:current-player state)
-        opposite-color (if (= color :white) :black :white)]
-    (-> state
-        (assoc :current-player opposite-color)
-        (assoc-in [:finished color] true)
-        (increase-turn-no))))
-
-(defn advance-turn-phase [state]
-  (let [advance-fn (fn [m] (let [turn-phase (:turn-phase m)
-                                 next-phase (case turn-phase
-                                              :designated-move :optional-move
-                                              :optional-move :select-opponent-piece
-                                              :select-opponent-piece :designated-move)
-                                 last-turn (= turn-phase :select-opponent-piece)]
-                             (cond-> m
-                               :always (assoc :turn-phase next-phase)
-                               last-turn change-turn)))]
-    (advance-fn state)))
 
 (defn check-winning-pawn [state]
   (let [{:keys [current-player pawns]} state
@@ -73,15 +99,13 @@
                   pawns))))
 
 (defn get-valid-tile [x y selected-pawn pawns]
-  (let [[sx sy] (get-pawn-position pawns selected-pawn)
-        nx (int (/ x cell-size))
-        ny (int (/ y cell-size))]
-    (when (and (or (and (<= (abs (- nx sx)) 1)
-                        (<= (abs (- ny sy)) 0.5))
-                   (and (<= (abs (- nx sx)) 0.5)
-                        (<= (abs (- ny sy)) 1)))
-               (valid-tile? pawns nx ny))
-      [nx ny])))
+  (let [[sx sy] (get-pawn-position pawns selected-pawn)]
+    (when (and (or (and (<= (abs (- x sx)) 1)
+                        (<= (abs (- y sy)) 0.5))
+                   (and (<= (abs (- x sx)) 0.5)
+                        (<= (abs (- y sy)) 1)))
+               (valid-tile? pawns x y))
+      [x y])))
 
 (defn get-valid-moves [pawns x y]
   (let [possible-moves [[0 1] [0 -1] [1 0] [-1 0]]]
@@ -90,16 +114,39 @@
          (filter (fn [pm] (apply #(valid-tile? pawns %1 %2) pm))))))
 
 (defn remove-blocked-pawn [{:keys [selected-pawn pawns] :as state}]
-  (when (vector? selected-pawn)
-    (let [[sx sy] (get-in pawns selected-pawn)
-          [color id] selected-pawn
-          valid-moves (get-valid-moves pawns sx sy)]
-      (if (empty? valid-moves)
-        (-> state
-            (update-in [:pawns color] dissoc id)
-            (assoc :selected-pawn nil)
-            (assoc :fixed-pawn nil))
-        state))))
+  (let [[sx sy] (get-in pawns selected-pawn)
+        [color id] selected-pawn
+        valid-moves (get-valid-moves pawns sx sy)]
+    (if (empty? valid-moves)
+      (-> state
+          (update-in [:pawns color] dissoc id)
+          (assoc :selected-pawn nil)
+          (assoc :fixed-pawn nil))
+      state)))
+
+(defn change-turn [state]
+  (let [color (:current-player state)
+        opposite-color (if (= color :white) :black :white)]
+    (-> state
+        (assoc :current-player opposite-color)
+        (assoc-in [:turn-finished color] true)
+        (increase-turn-no))))
+
+(declare handle-ai-actions)
+
+(defn advance-turn-phase [state]
+  (let [advance-fn (fn [m] (let [turn-phase (:turn-phase m)
+                                 next-phase (case turn-phase
+                                              :designated-move :optional-move
+                                              :optional-move :select-opponent-piece
+                                              :select-opponent-piece :designated-move)
+                                 last-turn (= turn-phase :select-opponent-piece)]
+                             (cond-> m
+                               :always (assoc :turn-phase next-phase)
+                               last-turn change-turn)))]
+    (-> state
+        advance-fn
+        handle-ai-actions)))
 
 (defn move-pawn [state x y]
   (let [{:keys [pawns selected-pawn]} state
@@ -116,22 +163,44 @@
         new-state)
       state)))
 
+;; TODO -animation should start sooner, dunno what to do exactly here!
 (defn pawn-widget [color selected?]
-  (w/Container
-   .width 60
-   .height 60
-   .decoration (w/BoxDecoration
-                .color (cond
-                         selected? m/Colors.red
-                         (= color :white) m/Colors.green
-                         :else m/Colors.black)
-                .shape w/BoxShape.circle)))
+  (let [opacity (atom 1.0)
+        fcolor (if (= color :white) m/Colors.green.shade600 m/Colors.black)
+        toggle-opacity (fn [] (swap! opacity #(if (= % 1.0) 0.0 1.0)))]
+    (when selected? (async/Timer.periodic
+                     (sched/Duration. .milliseconds 500)
+                     (fn [timer]
+                       (toggle-opacity)
+                       (when (not selected?) (.cancel ^async/Timer timer)))))
+    (f/widget
+     :watch [opacity opacity]
+     (w/Container
+      .width cell-size
+      .height cell-size
+      .child
+      (w/Center
+       .child
+       (w/Stack
+        .alignment m/Alignment.center
+        .children
+        [(w/Container
+          .width (- cell-size 8)
+          .height (-  cell-size 8)
+          .color (if selected? m/Colors.blue fcolor))
+         (w/AnimatedOpacity
+          .opacity opacity
+          .duration (sched/Duration. .milliseconds 500)
+          .child (w/Container
+                  .width (- cell-size 8)
+                  .height (- cell-size 8)
+                  .color fcolor))]))))))
 
 (defn message-box []
   (f/widget
    :watch [s state]
    (let [{:keys [current-player turn-phase pawns selected-pawn fixed-pawn winner-pawn
-                 last-moved-pawn turn-no finished]} s]
+                 last-moved-pawn turn-no turn-finished]} s]
      (m/Card
       .elevation 8
       .margin (w/EdgeInsets.all 16)
@@ -143,7 +212,7 @@
                    "\nFixed Pawn:" fixed-pawn
                    "\nPositions W: " (:white pawns)
                    "\nPositions B:" (:black pawns)
-                   "\nFinished: " finished
+                   "\nFinished: " turn-finished
                    "\nTurn Number:" turn-no
                    "\nWinner Pawn: " winner-pawn
                    "\nValid Moves: " (when selected-pawn
@@ -182,6 +251,55 @@
         :else state)
       state)))
 
+;; Let's program AI...
+;; W1 : B1 -> B2
+;;    : (random selection & movement)
+;;    : (random selection of opponent piece)
+;; B1 : (selected pawn) -> one field up
+;;    : (random selection & movement)
+;;    : (if blocked - select; if blocking winning pos - select ; if near opponent's winning pos and must move backward - select ; random selection)
+;; W2 : move in direct of winning position
+;;    : select nearest pawn (to winning pos) and move it; skip turn if it would create a blocked pawn on our side
+;;    : (if blocked - select; if blocking winning pos - select ; if near opponent's winning pos and must move backward - select ; random selection)
+;; .....
+(defn ai-select-pawn [state]
+  (let [{:keys [ai-player pawns last-moved-pawn]} state
+        pawns (get pawns ai-player)
+        [color id] last-moved-pawn
+        last-moved-id (when (= ai-player color) id)
+        id (rand-nth (disj (set (keys pawns)) last-moved-id))]
+    (assoc state :selected-pawn [:black id])))
+
+(defn ai-move-pawn [state]
+  (if-let [selected-pawn (:selected-pawn state)]
+    (let [{:keys [pawns]} state
+          [sx sy] (get-in pawns selected-pawn)
+          valid-moves (get-valid-moves pawns sx sy)
+          [x y] (rand-nth valid-moves)]
+      (move-pawn state x y))
+    state))
+
+(defn ai-select-opponent-pawn [state]
+  (let [pawns (get-in state [:pawns :white])
+        [id pos] (rand-nth (seq pawns))]
+    (select-pawn state :white id)))
+
+;; TODO - Jakmile vymazu figurku, prestane to fungovat!
+;; TODO - na dobre ceste, ale asi to bude treba muset zpomalit nebo neco :-D
+(defn handle-ai-actions [state]
+  (let [{:keys [current-player turn-phase ai-enabled selected-pawn]} state]
+    (if (and ai-enabled (= current-player :black))
+      (case turn-phase
+        :designated-move (if (vector? selected-pawn)
+                           (ai-move-pawn state)
+                           (-> state (ai-select-pawn) (ai-move-pawn)))
+        :optional-move (-> state (ai-select-pawn) (ai-move-pawn))
+        :select-opponent-piece (ai-select-opponent-pawn state)
+        state)
+      state)))
+
+;; END OF AI
+
 (defn first-turn-rule-black? [turn-no turn-phase]
   (and (not= turn-no 1) (= turn-phase :optional-move)))
 
@@ -189,6 +307,11 @@
   (m/TextButton
    .onPressed #(swap! state advance-turn-phase)
    .child (m/Text "Skip turn!")))
+
+(defn reset-game-button [state]
+  (m/TextButton
+   .onPressed #(reset! state initial-state)
+   .child (m/Text "Reset game!")))
 
 (defn board-widget []
   (f/widget
@@ -214,8 +337,8 @@
                        (for [y (range board-size-y)]
                          (w/GestureDetector
                           .onTap #(when selected-pawn
-                                    (swap! state move-pawn (* x cell-size) (* y cell-size)))
-                          .child (cell-widget x y))))))]
+                                    (swap! state move-pawn x y))
+                          .child (cell-widget [x y]))))))]
                   (for [[color positions] pawns
                         [id [x y]] positions]
                     (let [selected? (and (= selected-color color)
@@ -232,30 +355,16 @@
           (message-box)])
         (if (first-turn-rule-black? turn-no turn-phase)
           (skip-turn-button state)
-          (w/Container))])))))
+          (w/Container))
+        (reset-game-button state)])))))
 
 (defn main []
-  (let [initial-state {:pawns {:white {:a [0 0]
-                                       :b [1 0]
-                                       :c [2 0]}
-                               :black {:a [0 4]
-                                       :b [1 4]
-                                       :c [2 4]}}
-                       :selected-pawn nil
-                       :last-moved-pawn nil
-                       :fixed-pawn nil
-                       :current-player :white
-                       :turn-phase :designated-move
-                       :winner-pawn nil
-                       :finished {:white false
-                                  :black false}
-                       :turn-no 1}]
-    (reset! state initial-state)
-    (f/run
-     (m/MaterialApp
-      .title "Hupo"
-      .home (m/Scaffold
-             .appBar (m/AppBar .title (m/Text "Hra"))
-             .body  (m/Center
-                     .child
-                     (board-widget)))))))
+  (reset! state initial-state)
+  (f/run
+   (m/MaterialApp
+    .title "Hupo"
+    .home (m/Scaffold
+           .appBar (m/AppBar .title (m/Text "Hra"))
+           .body  (m/Center
+                   .child
+                   (board-widget))))))
