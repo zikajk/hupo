@@ -246,9 +246,13 @@
 (defn select-piece [state color id]
   (s/SystemSound.play
    (s/SystemSoundType.click))
-  (let [{:keys [current-player turn-no turn-phase fixed-piece]} state]
+  (let [{:keys [selected-piece current-player turn-no turn-phase fixed-piece]} state]
     (if-not fixed-piece
       (cond
+        (= selected-piece [color id])
+        (-> state
+            (assoc :selected-piece nil)
+            (assoc :fixed-piece nil))
         (and (= turn-phase :select-opponent-piece)
              (not= current-player color))
         (-> state
@@ -465,7 +469,7 @@
                                           .fontSize 16
                                           .color color
                                           .fontWeight w/FontWeight.bold))
-                          (if (and om (not first-turn) (not winner))
+                          (if (and om (not first-turn) (not winner) (not selected-piece))
                             (skip-turn-button state)
                             (m/Container))]))))))))
 
